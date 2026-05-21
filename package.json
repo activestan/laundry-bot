@@ -1,0 +1,27 @@
+{
+  "name": "laundry-telegram-bot",
+  "version": "1.0.0",
+  "description": "Full-featured Telegram bot for a laundry business with Flutterwave payments",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "keywords": ["telegram", "bot", "laundry", "flutterwave", "mongodb"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.4.1",
+    "node-cron": "^3.0.3",
+    "pdfkit": "^0.15.0",
+    "qrcode": "^1.5.3",
+    "telegraf": "^4.16.3",
+    "validator": "^13.12.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.3"
+  }
+}
