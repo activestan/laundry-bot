@@ -1,18 +1,9 @@
 /**
- * constants.js – Central place for business configuration and service catalogue.
+ * constants.js – Central place for business configuration.
+ *
+ * NOTE: Service catalogue (items & prices) is now stored in MongoDB
+ * and managed via admin commands. See src/services/catalogue.js
  */
-
-// ─── Laundry service catalogue ──────────────────────────────────
-const SERVICES = [
-  { id: 'shirt', name: 'Shirt', emoji: '👔', price: 500 },
-  { id: 'jean_trouser', name: 'Jean Trouser', emoji: '👖', price: 800 },
-  { id: 'tshirt', name: 'T-Shirt', emoji: '👕', price: 400 },
-  { id: 'native_wear', name: 'Native Wear', emoji: '🥻', price: 1200 },
-  { id: 'suit', name: 'Suit', emoji: '🤵', price: 2500 },
-  { id: 'hoodie', name: 'Hoodie', emoji: '🧥', price: 1500 },
-  { id: 'bedsheet', name: 'Bedsheet', emoji: '🛏️', price: 2000 },
-  { id: 'curtain', name: 'Curtain', emoji: '🪟', price: 3500 },
-];
 
 // ─── Delivery config ────────────────────────────────────────────
 const DELIVERY = {
@@ -20,7 +11,7 @@ const DELIVERY = {
   SELF_FEE: 0,
 };
 
-// ─── Order statuses (for tracking) ──────────────────────────────
+// ─── Order statuses (for tracking) ──────────────────────────
 const ORDER_STATUSES = ['pending', 'washing', 'drying', 'ready', 'delivered', 'cancelled'];
 
 const ORDER_STATUS_EMOJI = {
@@ -32,14 +23,14 @@ const ORDER_STATUS_EMOJI = {
   cancelled: '🔴',
 };
 
-// ─── Onboarding conversation steps ─────────────────────────────
+// ─── Onboarding conversation steps ─────────────────────────
 const ONBOARDING_STEPS = {
   ASK_FIRST_NAME: 'ask_first_name',
   ASK_LAST_NAME: 'ask_last_name',
   ASK_EMAIL: 'ask_email',
 };
 
-// ─── Order flow conversation steps ──────────────────────────────
+// ─── Order flow conversation steps ──────────────────────────
 const ORDER_STEPS = {
   SELECTING_ITEMS: 'selecting_items',
   ENTER_QUANTITY: 'enter_quantity',
@@ -53,7 +44,6 @@ const ORDER_STEPS = {
 };
 
 module.exports = {
-  SERVICES,
   DELIVERY,
   ORDER_STATUSES,
   ORDER_STATUS_EMOJI,

@@ -2,28 +2,38 @@
  * admin.js – Admin & worker commands with proper role separation.
  *
  * PERMISSIONS:
- * ┌────────────────────┬───────┬────────┐
- * │ Command            │ Admin │ Worker │
- * ├────────────────────┼───────┼────────┤
- * │ /orders            │  ✅   │   ❌   │
- * │ /pending           │  ✅   │   ❌   │
- * │ /paid              │  ✅   │   ❌   │
- * │ /customers         │  ✅   │   ❌   │
- * │ /stats             │  ✅   │   ❌   │
- * │ /track <ORDER>     │  ✅   │   ✅   │
- * │ /update <ORDER>    │  ✅   │   ✅   │
- * │ Status buttons     │  ✅   │   ✅   │
- * │ /staff             │  ✅   │   ✅   │
- * └────────────────────┴───────┴────────┘
- *
- * All messages use HTML parse mode to avoid Markdown escaping issues
- * with emails, usernames, dates, and special characters.
+ * ┌─────────────────────────┬───────┬────────┐
+ * │ Command                 │ Admin │ Worker │
+ * ├─────────────────────────┼───────┼────────┤
+ * │ /orders                 │  ✅   │   ❌   │
+ * │ /pending                │  ✅   │   ❌   │
+ * │ /paid                   │  ✅   │   ❌   │
+ * │ /customers              │  ✅   │   ❌   │
+ * │ /stats                  │  ✅   │   ❌   │
+ * │ /pricelist              │  ✅   │   ❌   │
+ * │ /setprice               │  ✅   │   ❌   │
+ * │ /additem                │  ✅   │   ❌   │
+ * │ /removeitem             │  ✅   │   ❌   │
+ * │ /track <ORDER>          │  ✅   │   ✅   │
+ * │ /update <ORDER>         │  ✅   │   ✅   │
+ * │ Status buttons          │  ✅   │   ✅   │
+ * │ /staff                  │  ✅   │   ✅   │
+ * └─────────────────────────┴───────┴────────┘
  */
 const { User, Order, Payment, DeliveryDetail } = require('../models');
 const { isAdmin, isWorker, isStaff, notifyStatusChange } = require('../services/notifications');
 const { formatNaira, formatDate } = require('../utils/helpers');
 const { ORDER_STATUSES, ORDER_STATUS_EMOJI } = require('../utils/constants');
 const { orderStatusKeyboard } = require('./keyboards');
+const {
+  getActiveServices,
+  formatDisplayPrice,
+  formatFullPrice,
+  addService,
+  updatePrice,
+  removeService,
+} = require('../services/catalogue');
+const { Service } = require('../models');
 
 function registerAdmin(bot) {
   // ─── /staff → Show available commands based on role ────────
@@ -44,6 +54,11 @@ function registerAdmin(bot) {
           '📦 <b>Order Management:</b>\n' +
           '  /track <code>ORDER_NUMBER</code> — Full order details\n' +
           '  /update <code>ORDER_NUMBER</code> <code>STATUS</code> — Update status\n\n' +
+          '💰 <b>Price Management:</b>\n' +
+          '  /pricelist — View all items &amp; prices\n' +
+          '  /setprice <code>ITEM_ID</code> <code>PRICE</code> — Change price\n' +
+          '  /additem <code>ID</code> <code>EMOJI</code> <code>PRICE</code> <code>NAME</code> — Add new item\n' +
+          '  /removeitem <code>ITEM_ID</code> — Remove an item\n\n' +
           '📋 <b>Statuses:</b> pending, washing, drying, ready, delivered, cancelled';
 
         return ctx.reply(msg, { parse_mode: 'HTML' });
@@ -66,6 +81,168 @@ function registerAdmin(bot) {
     } catch (err) {
       console.error('[Admin] /staff error:', err);
       await ctx.reply('❌ Something went wrong.');
+    }
+  });
+
+  // ─── /pricelist → View all items & prices (ADMIN ONLY) ────
+  bot.command('pricelist', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const services = await Service.find().sort({ sort_order: 1 });
+
+      if (!services.length) return ctx.reply('📭 No items in the catalogue.');
+
+      let msg = '💰 <b>Price List (Admin View)</b>\n';
+      msg += '━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+      msg += '<b>Customers see</b> → <b>Backend charges</b>\n\n';
+
+      for (const s of services) {
+        const status = s.is_active ? '✅' : '❌';
+        msg += `${status} ${s.emoji} <b>${s.name}</b>\n`;
+        msg += `  ID: <code>${s.id}</code>\n`;
+        msg += `  Display: ${formatDisplayPrice(s.price)} → Actual: ${formatFullPrice(s.price)}\n\n`;
+      }
+
+      msg += '━━━━━━━━━━━━━━━━━━━━━━━━\n';
+      msg += '<b>Commands:</b>\n';
+      msg += '  /setprice <code>item_id</code> <code>new_price</code>\n';
+      msg += '  /additem <code>id</code> <code>emoji</code> <code>price</code> <code>name</code>\n';
+      msg += '  /removeitem <code>item_id</code>';
+
+      await ctx.reply(msg, { parse_mode: 'HTML' });
+    } catch (err) {
+      console.error('[Admin] /pricelist error:', err);
+      await ctx.reply('❌ Error fetching price list.');
+    }
+  });
+
+  // ─── /setprice <ITEM_ID> <NEW_PRICE> → Change price (ADMIN ONLY) ─
+  bot.command('setprice', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const itemId = args[0];
+      const newPrice = parseInt(args[1], 10);
+
+      if (!itemId || isNaN(newPrice) || newPrice < 1) {
+        // Show available items
+        const services = await getActiveServices();
+        let msg = '📝 Usage: /setprice <code>item_id</code> <code>new_price</code>\n\n';
+        msg += '<b>Available items:</b>\n';
+        for (const s of services) {
+          msg += `  <code>${s.id}</code> — ${s.name} (${formatFullPrice(s.price)})\n`;
+        }
+        msg += '\n<b>Example:</b> /setprice native_wear 2000';
+        return ctx.reply(msg, { parse_mode: 'HTML' });
+      }
+
+      const service = await updatePrice(itemId, newPrice);
+
+      await ctx.reply(
+        `✅ Price updated!\n\n` +
+          `${service.emoji} <b>${service.name}</b>\n` +
+          `  Old display: customers will now see ${formatDisplayPrice(newPrice)}\n` +
+          `  Backend charges: ${formatFullPrice(newPrice)}`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /setprice error:', err);
+      await ctx.reply(`❌ ${err.message || 'Error updating price.'}`);
+    }
+  });
+
+  // ─── /additem <ID> <EMOJI> <PRICE> <NAME...> → Add item (ADMIN ONLY) ─
+  bot.command('additem', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+
+      if (args.length < 4) {
+        return ctx.reply(
+          '📝 Usage: /additem <code>id</code> <code>emoji</code> <code>price</code> <code>name</code>\n\n' +
+            '<b>Example:</b>\n' +
+            '/additem towel 🧻 500 Towels\n' +
+            '/additem blanket 🛏️ 3000 Blankets &amp; Throws\n\n' +
+            '<b>Rules:</b>\n' +
+            '• ID must be unique, lowercase, no spaces (use _ for spaces)\n' +
+            '• Price is the full round number (e.g. 1800, not 1799.99)\n' +
+            '• Name can have spaces',
+          { parse_mode: 'HTML' }
+        );
+      }
+
+      const id = args[0].toLowerCase().replace(/[^a-z0-9_]/g, '');
+      const emoji = args[1];
+      const price = parseInt(args[2], 10);
+      const name = args.slice(3).join(' ');
+
+      if (!id || id.length < 2) {
+        return ctx.reply('⚠️ ID must be at least 2 characters (lowercase, underscores allowed).');
+      }
+      if (isNaN(price) || price < 1) {
+        return ctx.reply('⚠️ Price must be a positive number.');
+      }
+      if (!name || name.length < 2) {
+        return ctx.reply('⚠️ Name must be at least 2 characters.');
+      }
+
+      const service = await addService({ id, name, emoji, price });
+
+      await ctx.reply(
+        `✅ New item added!\n\n` +
+          `${service.emoji} <b>${service.name}</b>\n` +
+          `  ID: <code>${service.id}</code>\n` +
+          `  Customers see: ${formatDisplayPrice(service.price)}\n` +
+          `  Backend charges: ${formatFullPrice(service.price)}\n\n` +
+          `Item is now live in the order menu.`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /additem error:', err);
+      await ctx.reply(`❌ ${err.message || 'Error adding item.'}`);
+    }
+  });
+
+  // ─── /removeitem <ITEM_ID> → Remove item (ADMIN ONLY) ────
+  bot.command('removeitem', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const itemId = args[0];
+
+      if (!itemId) {
+        const services = await getActiveServices();
+        let msg = '📝 Usage: /removeitem <code>item_id</code>\n\n';
+        msg += '<b>Active items:</b>\n';
+        for (const s of services) {
+          msg += `  <code>${s.id}</code> — ${s.name}\n`;
+        }
+        return ctx.reply(msg, { parse_mode: 'HTML' });
+      }
+
+      const service = await removeService(itemId);
+
+      await ctx.reply(
+        `✅ Item removed from menu!\n\n` +
+          `${service.emoji} <b>${service.name}</b> (<code>${service.id}</code>)\n\n` +
+          `<i>Item is hidden but not deleted. Existing orders with this item are not affected.</i>`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /removeitem error:', err);
+      await ctx.reply(`❌ ${err.message || 'Error removing item.'}`);
     }
   });
 
@@ -325,7 +502,6 @@ function registerAdmin(bot) {
 
       await ctx.reply(msg, { parse_mode: 'HTML' });
 
-      // Pickup details
       if (order.delivery_type === 'pickup') {
         const delivery = await DeliveryDetail.findOne({ order_id: order._id });
         if (delivery) {
@@ -340,7 +516,6 @@ function registerAdmin(bot) {
         }
       }
 
-      // Show status update buttons (both admin and worker can update)
       if (order.order_status !== 'delivered') {
         await ctx.reply(
           `⚙️ <b>Update status for ${order.order_number}:</b>`,
@@ -390,7 +565,6 @@ function registerAdmin(bot) {
       order.order_status = newStatus;
       await order.save();
 
-      // Notify customer
       await notifyStatusChange(order.telegram_id, order.order_number, oldStatus, newStatus);
 
       const updaterRole = isAdmin(ctx.from.id) ? '👑 Admin' : '👷 Worker';
@@ -435,7 +609,6 @@ function registerAdmin(bot) {
       order.order_status = newStatus;
       await order.save();
 
-      // Notify customer
       await notifyStatusChange(order.telegram_id, order.order_number, oldStatus, newStatus);
 
       const updaterRole = isAdmin(ctx.from.id) ? '👑 Admin' : '👷 Worker';

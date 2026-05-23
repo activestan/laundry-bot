@@ -7,4 +7,5 @@ module.exports = {
   Payment: require('./Payment'),
   DeliveryDetail: require('./DeliveryDetail'),
   Counter: require('./Counter'),
+  Service: require('./Service'),
 };

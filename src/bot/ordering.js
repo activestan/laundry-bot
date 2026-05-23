@@ -1,25 +1,25 @@
 /**
  * ordering.js – Handles the complete order flow.
  *
- * Flow:
- *   1. User taps "New Order"
- *   2. Show service menu (inline keyboard)
- *   3. User selects items → enters quantities
- *   4. Choose delivery option
- *   5. If pickup → collect address details
- *   6. Show order summary
- *   7. Confirm → instruct payment to virtual account
+ * Uses dynamic services from MongoDB catalogue.
+ * Display prices show minus 1 kobo (₦1,799.99).
+ * Backend stores and charges full round numbers (₦1,800).
  *
- * All messages use HTML parse mode to avoid Markdown escaping issues.
+ * All messages use HTML parse mode.
  */
 const { User, Order, DeliveryDetail } = require('../models');
-const { SERVICES, DELIVERY, ORDER_STEPS } = require('../utils/constants');
+const { DELIVERY, ORDER_STEPS } = require('../utils/constants');
 const {
-  formatNaira,
   sanitize,
   generateOrderNumber,
   calculateCart,
 } = require('../utils/helpers');
+const {
+  getActiveServices,
+  getServiceById,
+  formatDisplayPrice,
+  formatFullPrice,
+} = require('../services/catalogue');
 const {
   serviceMenuKeyboard,
   deliveryKeyboard,
@@ -40,6 +40,9 @@ function registerOrdering(bot) {
         return;
       }
 
+      // Load services from DB
+      const services = await getActiveServices();
+
       // Initialize order session
       ctx.session = ctx.session || {};
       ctx.session.step = ORDER_STEPS.SELECTING_ITEMS;
@@ -52,7 +55,7 @@ function registerOrdering(bot) {
           'When done, tap <b>"Done — Proceed"</b>.',
         {
           parse_mode: 'HTML',
-          ...serviceMenuKeyboard(new Set()),
+          ...serviceMenuKeyboard(services, new Set()),
         }
       );
     } catch (err) {
@@ -67,7 +70,7 @@ function registerOrdering(bot) {
       await ctx.answerCbQuery();
 
       const itemId = ctx.match[1];
-      const service = SERVICES.find((s) => s.id === itemId);
+      const service = await getServiceById(itemId);
       if (!service) return;
 
       ctx.session = ctx.session || {};
@@ -83,7 +86,7 @@ function registerOrdering(bot) {
         // Select and ask for quantity
         ctx.session.cart[itemId] = {
           name: service.name,
-          unit_price: service.price,
+          unit_price: service.price, // Full round number stored
           quantity: 0,
         };
         ctx.session.selectedItems.push(itemId);
@@ -93,7 +96,7 @@ function registerOrdering(bot) {
         ctx.session.currentItem = itemId;
 
         await ctx.editMessageText(
-          `${service.emoji} <b>${service.name}</b> — ${formatNaira(service.price)} each\n\n` +
+          `${service.emoji} <b>${service.name}</b> — ${formatDisplayPrice(service.price)} each\n\n` +
             `📝 <b>How many do you have?</b>\n` +
             `Enter a number:`,
           { parse_mode: 'HTML' }
@@ -102,9 +105,10 @@ function registerOrdering(bot) {
       }
 
       // Update the menu
+      const services = await getActiveServices();
       const selectedSet = new Set(Object.keys(ctx.session.cart));
       try {
-        await ctx.editMessageReplyMarkup(serviceMenuKeyboard(selectedSet).reply_markup);
+        await ctx.editMessageReplyMarkup(serviceMenuKeyboard(services, selectedSet).reply_markup);
       } catch (e) {
         // Message not modified – ignore
       }
@@ -130,13 +134,13 @@ function registerOrdering(bot) {
       // Move to delivery selection
       ctx.session.step = ORDER_STEPS.CHOOSE_DELIVERY;
 
-      // Show cart summary
+      // Show cart summary — display prices to customer
       const { detailedItems, subtotal } = calculateCart(items);
       let summary = '🛒 <b>Your Cart:</b>\n\n';
       for (const item of detailedItems) {
-        summary += `  ${item.quantity}x ${item.name} = ${formatNaira(item.line_total)}\n`;
+        summary += `  ${item.quantity}x ${item.name} = ${formatDisplayPrice(item.line_total)}\n`;
       }
-      summary += `\n📦 <b>Subtotal:</b> ${formatNaira(subtotal)}\n\n`;
+      summary += `\n📦 <b>Subtotal:</b> ${formatDisplayPrice(subtotal)}\n\n`;
       summary += '🚚 <b>Choose your delivery option:</b>';
 
       await ctx.editMessageText(summary, {
@@ -159,7 +163,7 @@ function registerOrdering(bot) {
 
       await ctx.editMessageText(
         `🚚 <b>Pickup Delivery selected</b>\n` +
-          `Delivery fee: ${formatNaira(DELIVERY.PICKUP_FEE)}\n\n` +
+          `Delivery fee: ${formatDisplayPrice(DELIVERY.PICKUP_FEE)}\n\n` +
           `We need your pickup details.\n\n` +
           `🏠 <b>What is the name of your lodge/hostel/estate?</b>`,
         { parse_mode: 'HTML' }
@@ -177,7 +181,6 @@ function registerOrdering(bot) {
       ctx.session.deliveryFee = DELIVERY.SELF_FEE;
       ctx.session.step = ORDER_STEPS.CONFIRM_ORDER;
 
-      // Skip address collection → show order summary
       await showOrderSummary(ctx);
     } catch (err) {
       console.error('[Ordering] delivery_self error:', err);
@@ -217,7 +220,6 @@ function registerOrdering(bot) {
 
 /**
  * Handle text messages during ordering flow.
- * Returns true if handled, false otherwise.
  */
 async function handleOrderingMessage(ctx) {
   if (!ctx.session || !ctx.session.step) return false;
@@ -241,7 +243,8 @@ async function handleOrderingMessage(ctx) {
     delete ctx.session.currentItem;
     ctx.session.step = ORDER_STEPS.SELECTING_ITEMS;
 
-    const service = SERVICES.find((s) => s.id === itemId);
+    const service = await getServiceById(itemId);
+    const services = await getActiveServices();
     const selectedSet = new Set(Object.keys(ctx.session.cart || {}));
 
     await ctx.reply(
@@ -249,7 +252,7 @@ async function handleOrderingMessage(ctx) {
         `Select more items or tap <b>"Done — Proceed"</b>:`,
       {
         parse_mode: 'HTML',
-        ...serviceMenuKeyboard(selectedSet),
+        ...serviceMenuKeyboard(services, selectedSet),
       }
     );
     return true;
@@ -316,6 +319,7 @@ async function handleOrderingMessage(ctx) {
 
 /**
  * Display the complete order summary for confirmation.
+ * Shows display prices (minus 1 kobo) to customer.
  */
 async function showOrderSummary(ctx) {
   const cart = ctx.session.cart || {};
@@ -328,18 +332,18 @@ async function showOrderSummary(ctx) {
   summary += '━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
   for (const item of detailedItems) {
-    summary += `  ${item.quantity}x ${item.name} = ${formatNaira(item.line_total)}\n`;
+    summary += `  ${item.quantity}x ${item.name} = ${formatDisplayPrice(item.line_total)}\n`;
   }
 
   summary += '\n';
   if (ctx.session.deliveryType === 'pickup') {
-    summary += `  🚚 Pickup Delivery = ${formatNaira(deliveryFee)}\n`;
+    summary += `  🚚 Pickup Delivery = ${formatDisplayPrice(deliveryFee)}\n`;
   } else {
     summary += `  🏃 Self Delivery = FREE\n`;
   }
 
   summary += '\n━━━━━━━━━━━━━━━━━━━━━━━━\n';
-  summary += `  💰 <b>TOTAL = ${formatNaira(total)}</b>\n`;
+  summary += `  💰 <b>TOTAL = ${formatDisplayPrice(total)}</b>\n`;
   summary += '━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
   if (ctx.session.pickup) {
@@ -360,6 +364,7 @@ async function showOrderSummary(ctx) {
 
 /**
  * Process the confirmed order: save to DB, show payment instructions.
+ * Backend stores FULL round prices. Customer sees display prices.
  */
 async function processOrderConfirmation(ctx) {
   const telegramId = ctx.from.id;
@@ -378,15 +383,14 @@ async function processOrderConfirmation(ctx) {
     return;
   }
 
+  // calculateCart uses full round prices from the cart
   const { detailedItems, subtotal } = calculateCart(rawItems);
   const deliveryType = ctx.session.deliveryType || 'self';
   const deliveryFee = ctx.session.deliveryFee || 0;
-  const totalAmount = subtotal + deliveryFee;
+  const totalAmount = subtotal + deliveryFee; // Full round number
 
-  // Generate order number
   const orderNumber = await generateOrderNumber();
 
-  // Save order
   const order = await Order.create({
     order_number: orderNumber,
     customer_id: user._id,
@@ -400,7 +404,6 @@ async function processOrderConfirmation(ctx) {
     order_status: 'pending',
   });
 
-  // Save delivery details if pickup
   if (deliveryType === 'pickup' && ctx.session.pickup) {
     await DeliveryDetail.create({
       order_id: order._id,
@@ -423,16 +426,16 @@ async function processOrderConfirmation(ctx) {
   delete ctx.session.pickup;
   delete ctx.session.currentItem;
 
-  // Build payment instruction
+  // Payment instruction — show full price for transfer
   let paymentMsg =
     `✅ <b>Order Placed Successfully!</b>\n\n` +
     `🔢 <b>Order Number:</b> <code>${orderNumber}</code>\n` +
-    `💰 <b>Total:</b> ${formatNaira(totalAmount)}\n\n`;
+    `💰 <b>Total:</b> ${formatFullPrice(totalAmount)}\n\n`;
 
   if (user.virtual_account && user.virtual_account.account_number) {
     paymentMsg +=
       `💳 <b>To complete your order, transfer exactly</b>\n` +
-      `<b>${formatNaira(totalAmount)}</b> to:\n\n` +
+      `<b>${formatFullPrice(totalAmount)}</b> to:\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `🏦 <b>Bank:</b> ${user.virtual_account.bank_name}\n` +
       `🔢 <b>Account:</b> <code>${user.virtual_account.account_number}</code>\n` +

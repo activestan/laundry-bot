@@ -1,9 +1,9 @@
 /**
  * keyboards.js – Telegram inline & reply keyboard builders.
+ * Uses dynamic services from the catalogue.
  */
 const { Markup } = require('telegraf');
-const { SERVICES } = require('../utils/constants');
-const { formatNaira } = require('../utils/helpers');
+const { formatDisplayPrice } = require('../services/catalogue');
 
 /**
  * Main menu reply keyboard.
@@ -34,9 +34,6 @@ function orderHistoryKeyboard() {
 
 /**
  * Pagination buttons for order history.
- * @param {number} currentPage – current page (1-indexed)
- * @param {number} totalPages
- * @param {number} months – the selected time range (0 = all time)
  */
 function historyPaginationKeyboard(currentPage, totalPages, months) {
   const buttons = [];
@@ -55,16 +52,17 @@ function historyPaginationKeyboard(currentPage, totalPages, months) {
 }
 
 /**
- * Service selection inline keyboard.
- * Each button shows the item name + price.
- * `selectedItems` is a Set of item IDs already in the cart.
+ * Service selection inline keyboard (DYNAMIC from DB).
+ * Shows display price (minus 1 kobo) to customers.
+ * @param {Array} services - array of service documents from DB
+ * @param {Set} selectedItems - Set of item IDs already in cart
  */
-function serviceMenuKeyboard(selectedItems = new Set()) {
-  const buttons = SERVICES.map((svc) => {
+function serviceMenuKeyboard(services, selectedItems = new Set()) {
+  const buttons = services.map((svc) => {
     const check = selectedItems.has(svc.id) ? ' ✅' : '';
     return [
       Markup.button.callback(
-        `${svc.emoji} ${svc.name} — ${formatNaira(svc.price)}${check}`,
+        `${svc.emoji} ${svc.name} — ${formatDisplayPrice(svc.price)}${check}`,
         `select_item_${svc.id}`
       ),
     ];
