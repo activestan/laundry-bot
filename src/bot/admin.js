@@ -32,6 +32,7 @@ const {
   addService,
   updatePrice,
   removeService,
+  reactivateService,
 } = require('../services/catalogue');
 const { Service } = require('../models');
 
@@ -58,7 +59,8 @@ function registerAdmin(bot) {
           '  /pricelist — View all items &amp; prices\n' +
           '  /setprice <code>ITEM_ID</code> <code>PRICE</code> — Change price\n' +
           '  /additem <code>ID</code> <code>EMOJI</code> <code>PRICE</code> <code>NAME</code> — Add new item\n' +
-          '  /removeitem <code>ITEM_ID</code> — Remove an item\n\n' +
+          '  /removeitem <code>ITEM_ID</code> — Remove an item\n' +
+          '  /restoreitem <code>ITEM_ID</code> — Restore a removed item\n\n' +
           '📋 <b>Statuses:</b> pending, washing, drying, ready, delivered, cancelled';
 
         return ctx.reply(msg, { parse_mode: 'HTML' });
@@ -246,6 +248,42 @@ function registerAdmin(bot) {
     }
   });
 
+
+  // ─── /restoreitem <ITEM_ID> → Restore hidden item (ADMIN ONLY) ────
+  bot.command('restoreitem', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const itemId = args[0];
+
+      if (!itemId) {
+        const services = await Service.find({ is_active: false }).sort({ sort_order: 1 });
+        if (!services.length) return ctx.reply('✅ No hidden items to restore.');
+        let msg = '📝 Usage: /restoreitem <code>item_id</code>\n\n';
+        msg += '<b>Hidden items:</b>\n';
+        for (const s of services) {
+          msg += '  <code>' + s.id + '</code> — ' + s.name + '\n';
+        }
+        return ctx.reply(msg, { parse_mode: 'HTML' });
+      }
+
+      const service = await reactivateService(itemId);
+
+      await ctx.reply(
+        '✅ Item restored!\n\n' +
+          '' + service.emoji + ' <b>' + service.name + '</b> (<code>' + service.id + '</code>)\n' +
+          'Price: ' + formatDisplayPrice(service.price) + '\n\n' +
+          '<i>Item is now visible in the order menu again.</i>',
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /restoreitem error:', err);
+      await ctx.reply('❌ ' + (err.message || 'Error restoring item.'));
+    }
+  });
   // ─── /orders → All orders (ADMIN ONLY) ────────────────────
   bot.command('orders', async (ctx) => {
     if (!isAdmin(ctx.from.id)) {
