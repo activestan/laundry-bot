@@ -30,11 +30,13 @@ function flwClient() {
  * @param {string} params.firstName
  * @param {string} params.lastName
  * @param {string} params.txRef      – unique reference, e.g. `LDRY-USR-<telegramId>`
- * @param {number} params.amount     – expected initial amount (can be 0 for static accounts)
  * @returns {Object} { account_number, bank_name, account_reference, order_ref, flw_ref }
  */
 async function createVirtualAccount({ email, firstName, lastName, txRef, bvn }) {
   try {
+    // Use BUSINESS_NAME from env so the account narration matches your brand
+    const businessName = process.env.BUSINESS_NAME || 'Praisel Laundromat';
+
     const payload = {
       email,
       is_permanent: true,
@@ -43,7 +45,7 @@ async function createVirtualAccount({ email, firstName, lastName, txRef, bvn }) 
       tx_ref: txRef,
       firstname: firstName,
       lastname: lastName,
-      narration: `${firstName} ${lastName} – FreshPress Laundry`,
+      narration: `${firstName} ${lastName} – ${businessName}`,
     };
 
     const { data } = await flwClient().post('/virtual-account-numbers', payload);
