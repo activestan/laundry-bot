@@ -1,26 +1,7 @@
 /**
  * admin.js – Admin & worker commands with proper role separation.
- *
- * PERMISSIONS:
- * ┌─────────────────────────┬───────┬────────┐
- * │ Command                 │ Admin │ Worker │
- * ├─────────────────────────┼───────┼────────┤
- * │ /orders                 │  ✅   │   ❌   │
- * │ /pending                │  ✅   │   ❌   │
- * │ /paid                   │  ✅   │   ❌   │
- * │ /customers              │  ✅   │   ❌   │
- * │ /stats                  │  ✅   │   ❌   │
- * │ /pricelist              │  ✅   │   ❌   │
- * │ /setprice               │  ✅   │   ❌   │
- * │ /additem                │  ✅   │   ❌   │
- * │ /removeitem             │  ✅   │   ❌   │
- * │ /track <ORDER>          │  ✅   │   ✅   │
- * │ /update <ORDER>         │  ✅   │   ✅   │
- * │ Status buttons          │  ✅   │   ✅   │
- * │ /staff                  │  ✅   │   ✅   │
- * └─────────────────────────┴───────┴────────┘
  */
-const { User, Order, Payment, DeliveryDetail } = require('../models');
+const { User, Order, Payment, DeliveryDetail, Service } = require('../models');
 const { isAdmin, isWorker, isStaff, notifyStatusChange } = require('../services/notifications');
 const { formatNaira, formatDate } = require('../utils/helpers');
 const { ORDER_STATUSES, ORDER_STATUS_EMOJI } = require('../utils/constants');
@@ -34,7 +15,7 @@ const {
   removeService,
   reactivateService,
 } = require('../services/catalogue');
-const { Service } = require('../models');
+const { getDeliveryFee, setDeliveryFee } = require('../services/settings');
 
 function registerAdmin(bot) {
   // ─── /staff → Show available commands based on role ────────
@@ -60,7 +41,8 @@ function registerAdmin(bot) {
           '  /setprice <code>ITEM_ID</code> <code>PRICE</code> — Change price\n' +
           '  /additem <code>ID</code> <code>EMOJI</code> <code>PRICE</code> <code>NAME</code> — Add new item\n' +
           '  /removeitem <code>ITEM_ID</code> — Remove an item\n' +
-          '  /restoreitem <code>ITEM_ID</code> — Restore a removed item\n\n' +
+          '  /restoreitem <code>ITEM_ID</code> — Restore a removed item\n' +
+          '  /setdelivery <code>AMOUNT</code> — Change delivery fee\n\n' +
           '📋 <b>Statuses:</b> pending, washing, drying, ready, delivered, cancelled';
 
         return ctx.reply(msg, { parse_mode: 'HTML' });
@@ -282,6 +264,41 @@ function registerAdmin(bot) {
     } catch (err) {
       console.error('[Admin] /restoreitem error:', err);
       await ctx.reply('❌ ' + (err.message || 'Error restoring item.'));
+    }
+  });
+
+  // ─── /setdelivery <AMOUNT> → Change delivery fee (ADMIN ONLY) ────
+  bot.command('setdelivery', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const newFee = parseInt(args[0], 10);
+
+      if (isNaN(newFee) || newFee < 0) {
+        const currentFee = await getDeliveryFee();
+        return ctx.reply(
+          '📝 Usage: /setdelivery <code>amount</code>\n\n' +
+          'Current delivery fee: <b>' + formatNaira(currentFee) + '</b>\n\n' +
+          'Example: /setdelivery 2500',
+          { parse_mode: 'HTML' }
+        );
+      }
+
+      await setDeliveryFee(newFee);
+      const { formatDisplayPrice } = require('../services/catalogue');
+
+      await ctx.reply(
+        '✅ Delivery fee updated!\n\n' +
+        '🚚 Customers see: <b>' + formatDisplayPrice(newFee) + '</b>\n' +
+        '💰 Backend charges: <b>' + formatNaira(newFee) + '</b>',
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /setdelivery error:', err);
+      await ctx.reply('❌ Error updating delivery fee.');
     }
   });
   // ─── /orders → All orders (ADMIN ONLY) ────────────────────

@@ -81,9 +81,10 @@ function serviceMenuKeyboard(services, selectedItems = new Set()) {
 /**
  * Delivery option inline keyboard.
  */
-function deliveryKeyboard() {
+function deliveryKeyboard(pickupFee) {
+  const feeDisplay = pickupFee ? formatDisplayPrice(pickupFee) : '₦2,999.99';
   return Markup.inlineKeyboard([
-    [Markup.button.callback('🚚 Pickup Delivery (₦3,000)', 'delivery_pickup')],
+    [Markup.button.callback(`🚚 Pickup Delivery (${feeDisplay})`, 'delivery_pickup')],
     [Markup.button.callback('🏃 Self Delivery (Free)', 'delivery_self')],
   ]);
 }

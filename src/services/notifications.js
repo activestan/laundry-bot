@@ -7,6 +7,7 @@
  *
  * All Telegram messages use HTML parse mode for reliability.
  */
+const { Markup } = require('telegraf');
 const { buildWorkerNotification, buildMarkdownReceipt, generatePDFReceipt } = require('./receipt');
 
 /**
@@ -77,7 +78,7 @@ async function notifyStaff({ order, user, deliveryDetail }) {
 async function sendCustomerReceipt({ order, user, deliveryDetail }) {
   if (!botInstance) return;
 
-  const businessName = process.env.BUSINESS_NAME || 'FreshPress Laundry';
+  const businessName = process.env.BUSINESS_NAME || 'Praisel Laundromat';
   const whatsapp = process.env.BUSINESS_WHATSAPP || '+234XXXXXXXXXX';
 
   // HTML receipt
@@ -121,6 +122,7 @@ async function sendCustomerReceipt({ order, user, deliveryDetail }) {
 
 /**
  * Notify customer about order status change.
+ * When status changes to "delivered", also send a rating prompt.
  */
 async function notifyStatusChange(telegramId, orderNumber, oldStatus, newStatus) {
   if (!botInstance) return;
@@ -151,6 +153,46 @@ async function notifyStatusChange(telegramId, orderNumber, oldStatus, newStatus)
     await botInstance.telegram.sendMessage(telegramId, message, { parse_mode: 'HTML' });
   } catch (err) {
     console.error('[Notifications] notifyStatusChange failed:', err.message);
+  }
+
+  // If delivered → ask for rating
+  if (newStatus === 'delivered') {
+    try {
+      await sendRatingPrompt(telegramId, orderNumber);
+    } catch (err) {
+      console.error('[Notifications] sendRatingPrompt failed:', err.message);
+    }
+  }
+}
+
+/**
+ * Send rating prompt with star buttons after delivery.
+ */
+async function sendRatingPrompt(telegramId, orderNumber) {
+  if (!botInstance) return;
+
+  const message =
+    `⭐ <b>How was our service?</b>\n\n` +
+    `Order: <code>${orderNumber}</code>\n\n` +
+    `Please rate your experience:`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback('1 ⭐', `rate_${orderNumber}_1`),
+      Markup.button.callback('2 ⭐', `rate_${orderNumber}_2`),
+      Markup.button.callback('3 ⭐', `rate_${orderNumber}_3`),
+      Markup.button.callback('4 ⭐', `rate_${orderNumber}_4`),
+      Markup.button.callback('5 ⭐', `rate_${orderNumber}_5`),
+    ],
+  ]);
+
+  try {
+    await botInstance.telegram.sendMessage(telegramId, message, {
+      parse_mode: 'HTML',
+      ...keyboard,
+    });
+  } catch (err) {
+    console.error('[Notifications] sendRatingPrompt send failed:', err.message);
   }
 }
 
@@ -190,5 +232,6 @@ module.exports = {
   notifyStaff,
   sendCustomerReceipt,
   notifyStatusChange,
+  sendRatingPrompt,
   sendDailySummary,
 };

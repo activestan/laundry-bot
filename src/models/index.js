@@ -8,4 +8,6 @@ module.exports = {
   DeliveryDetail: require('./DeliveryDetail'),
   Counter: require('./Counter'),
   Service: require('./Service'),
+  Settings: require('./Settings'),
+  Rating: require('./Rating'),
 };

@@ -13,14 +13,14 @@ const {
   orderHistoryKeyboard,
   historyPaginationKeyboard,
 } = require('./keyboards');
-const { User, Order, DeliveryDetail } = require('../models');
-const { formatNaira, formatDate } = require('../utils/helpers');
+const { User, Order, DeliveryDetail, Rating } = require('../models');
+const { formatNaira, formatDate, sanitize } = require('../utils/helpers');
 const { ORDER_STATUS_EMOJI } = require('../utils/constants');
-const { setBotInstance } = require('../services/notifications');
+const { setBotInstance, isAdmin } = require('../services/notifications');
 const { createMongoStore } = require('./sessionStore');
 
 // ─── Order history config ───────────────────────────────────
-const HISTORY_PAGE_SIZE = 5; // orders per page
+const HISTORY_PAGE_SIZE = 5;
 
 /**
  * Build the order history message for a given page of orders.
@@ -66,9 +66,6 @@ function buildHistoryMessage(orders, page, totalPages, totalOrders, rangeLabel) 
   return msg;
 }
 
-/**
- * Calculate the "from" date for a given month range.
- */
 function getDateFrom(months) {
   if (months === 0) return null;
   const d = new Date();
@@ -77,9 +74,6 @@ function getDateFrom(months) {
   return d;
 }
 
-/**
- * Fetch and display order history.
- */
 async function showOrderHistory(ctx, userId, months, page) {
   const dateFrom = getDateFrom(months);
   const query = { customer_id: userId };
@@ -92,11 +86,8 @@ async function showOrderHistory(ctx, userId, months, page) {
     const text = `📜 <b>Order History — ${rangeLabel}</b>\n\n📭 No orders found in this period.\n\nTap 🧺 <b>New Order</b> to place your first!`;
 
     if (ctx.callbackQuery) {
-      try {
-        await ctx.editMessageText(text, { parse_mode: 'HTML' });
-      } catch {
-        await ctx.reply(text, { parse_mode: 'HTML' });
-      }
+      try { await ctx.editMessageText(text, { parse_mode: 'HTML' }); }
+      catch { await ctx.reply(text, { parse_mode: 'HTML' }); }
     } else {
       await ctx.reply(text, { parse_mode: 'HTML' });
     }
@@ -117,11 +108,8 @@ async function showOrderHistory(ctx, userId, months, page) {
   const pagination = totalPages > 1 ? historyPaginationKeyboard(safePage, totalPages, months) : undefined;
 
   if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(msg, { parse_mode: 'HTML', ...pagination });
-    } catch {
-      await ctx.reply(msg, { parse_mode: 'HTML', ...pagination });
-    }
+    try { await ctx.editMessageText(msg, { parse_mode: 'HTML', ...pagination }); }
+    catch { await ctx.reply(msg, { parse_mode: 'HTML', ...pagination }); }
   } else {
     await ctx.reply(msg, { parse_mode: 'HTML', ...pagination });
   }
@@ -141,7 +129,6 @@ function createBot() {
     })
   );
 
-  // Ensure session object always exists
   bot.use((ctx, next) => {
     ctx.session = ctx.session || {};
     return next();
@@ -152,7 +139,137 @@ function createBot() {
   registerOrdering(bot);
   registerAdmin(bot);
 
-  // ─── "My Orders" button (quick view — last 10) ──────────────
+  // ─── Rating callback: customer taps a star ───────────────────
+  bot.action(/^rate_(.+)_(\d)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+
+      const orderNumber = ctx.match[1];
+      const stars = parseInt(ctx.match[2], 10);
+      const telegramId = ctx.from.id;
+
+      const user = await User.findOne({ telegram_id: telegramId });
+      if (!user) return;
+
+      const order = await Order.findOne({ order_number: orderNumber, customer_id: user._id });
+      if (!order) return;
+
+      // Check if already rated
+      const existing = await Rating.findOne({ order_id: order._id });
+      if (existing) {
+        await ctx.editMessageText(
+          `⭐ You already rated this order: ${'⭐'.repeat(existing.stars)}\n\nThank you!`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      // Save rating
+      await Rating.create({
+        order_id: order._id,
+        order_number: orderNumber,
+        customer_id: user._id,
+        telegram_id: telegramId,
+        stars: stars,
+      });
+
+      // Ask for optional feedback
+      ctx.session = ctx.session || {};
+      ctx.session.step = 'awaiting_feedback';
+      ctx.session.ratingOrderNumber = orderNumber;
+
+      const starsDisplay = '⭐'.repeat(stars);
+
+      await ctx.editMessageText(
+        `${starsDisplay}\n\n` +
+          `Thank you for rating <code>${orderNumber}</code>!\n\n` +
+          `💬 <b>Would you like to leave a comment?</b>\n` +
+          `Type your feedback below, or send /skip to skip.`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Bot] Rating callback error:', err);
+    }
+  });
+
+  // ─── /skip → Skip feedback ──────────────────────────────────
+  bot.command('skip', async (ctx) => {
+    if (ctx.session && ctx.session.step === 'awaiting_feedback') {
+      delete ctx.session.step;
+      delete ctx.session.ratingOrderNumber;
+      await ctx.reply('👍 No problem! Thank you for your rating.', mainMenuKeyboard());
+    }
+  });
+
+  // ─── /ratings → View ratings summary (ADMIN ONLY) ──────────
+  bot.command('ratings', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const totalRatings = await Rating.countDocuments();
+
+      if (totalRatings === 0) {
+        return ctx.reply('📭 No ratings yet.');
+      }
+
+      // Average rating
+      const avgAgg = await Rating.aggregate([
+        { $group: { _id: null, avg: { $avg: '$stars' }, count: { $sum: 1 } } },
+      ]);
+      const avgRating = avgAgg[0].avg.toFixed(1);
+
+      // Star breakdown
+      const breakdown = await Rating.aggregate([
+        { $group: { _id: '$stars', count: { $sum: 1 } } },
+        { $sort: { _id: -1 } },
+      ]);
+
+      let breakdownText = '';
+      for (let i = 5; i >= 1; i--) {
+        const found = breakdown.find((b) => b._id === i);
+        const count = found ? found.count : 0;
+        const bar = '█'.repeat(Math.round((count / totalRatings) * 20));
+        breakdownText += `  ${'⭐'.repeat(i)} ${bar} ${count}\n`;
+      }
+
+      // Recent reviews with feedback
+      const recentWithFeedback = await Rating.find({ feedback: { $ne: null } })
+        .sort({ created_at: -1 })
+        .limit(5)
+        .populate('customer_id', 'first_name last_name');
+
+      let recentText = '';
+      if (recentWithFeedback.length > 0) {
+        recentText = '\n💬 <b>Recent Feedback:</b>\n\n';
+        for (const r of recentWithFeedback) {
+          const name = r.customer_id
+            ? `${r.customer_id.first_name} ${r.customer_id.last_name}`
+            : 'Customer';
+          recentText +=
+            `  ${'⭐'.repeat(r.stars)} — ${name}\n` +
+            `  <i>"${r.feedback}"</i>\n` +
+            `  📅 ${formatDate(r.created_at)}\n\n`;
+        }
+      }
+
+      const msg =
+        `⭐ <b>Customer Ratings</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `📊 <b>Average:</b> ${avgRating} ⭐ (${totalRatings} ratings)\n\n` +
+        `<b>Breakdown:</b>\n` +
+        breakdownText +
+        recentText;
+
+      await ctx.reply(msg, { parse_mode: 'HTML' });
+    } catch (err) {
+      console.error('[Bot] /ratings error:', err);
+      await ctx.reply('❌ Error fetching ratings.');
+    }
+  });
+
+  // ─── "My Orders" button ──────────────────────────────────────
   bot.hears('📋 My Orders', async (ctx) => {
     try {
       const user = await User.findOne({ telegram_id: ctx.from.id });
@@ -210,20 +327,14 @@ function createBot() {
     }
   });
 
-  // ─── History time-range callbacks ────────────────────────────
+  // ─── History callbacks ───────────────────────────────────────
   bot.action(/^history_(\d+|all)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery();
-
       const user = await User.findOne({ telegram_id: ctx.from.id });
-      if (!user) {
-        await ctx.editMessageText('⚠️ Please register first with /start');
-        return;
-      }
-
+      if (!user) { await ctx.editMessageText('⚠️ Please register first with /start'); return; }
       const param = ctx.match[1];
       const months = param === 'all' ? 0 : parseInt(param, 10);
-
       await showOrderHistory(ctx, user._id, months, 1);
     } catch (err) {
       console.error('[Bot] history callback error:', err);
@@ -231,27 +342,20 @@ function createBot() {
     }
   });
 
-  // ─── History pagination callbacks ────────────────────────────
   bot.action(/^histpage_(\d+)_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery();
-
       const user = await User.findOne({ telegram_id: ctx.from.id });
       if (!user) return;
-
       const months = parseInt(ctx.match[1], 10);
       const page = parseInt(ctx.match[2], 10);
-
       await showOrderHistory(ctx, user._id, months, page);
     } catch (err) {
       console.error('[Bot] history pagination error:', err);
     }
   });
 
-  // ─── Ignore "noop" button (page indicator) ──────────────────
-  bot.action('noop', async (ctx) => {
-    await ctx.answerCbQuery();
-  });
+  bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
   // ─── "My Account" button ─────────────────────────────────────
   bot.hears('💳 My Account', async (ctx) => {
@@ -293,11 +397,8 @@ function createBot() {
     try {
       ctx.session = ctx.session || {};
       ctx.session.step = 'awaiting_track_number';
-
       await ctx.reply(
-        '🔍 <b>Track Your Order</b>\n\n' +
-          'Please enter your order number:\n' +
-          '<i>(e.g. LDRY-2025-0001)</i>',
+        '🔍 <b>Track Your Order</b>\n\nPlease enter your order number:\n<i>(e.g. LDRY-2025-0001)</i>',
         { parse_mode: 'HTML' }
       );
     } catch (err) {
@@ -309,7 +410,7 @@ function createBot() {
   // ─── "Help" button ───────────────────────────────────────────
   bot.hears('ℹ️ Help', async (ctx) => {
     try {
-      const businessName = process.env.BUSINESS_NAME || 'FreshPress Laundry';
+      const businessName = process.env.BUSINESS_NAME || 'Praisel Laundromat';
       const whatsapp = process.env.BUSINESS_WHATSAPP || '+234XXXXXXXXXX';
 
       const msg =
@@ -342,9 +443,31 @@ function createBot() {
     }
   });
 
-  // ─── General text handler (routes to active conversation) ───
+  // ─── General text handler ────────────────────────────────────
   bot.on('text', async (ctx) => {
     try {
+      // Check if awaiting rating feedback
+      if (ctx.session && ctx.session.step === 'awaiting_feedback') {
+        const feedback = sanitize(ctx.message.text);
+        const orderNumber = ctx.session.ratingOrderNumber;
+
+        delete ctx.session.step;
+        delete ctx.session.ratingOrderNumber;
+
+        if (orderNumber && feedback) {
+          await Rating.findOneAndUpdate(
+            { order_number: orderNumber, telegram_id: ctx.from.id },
+            { feedback: feedback }
+          );
+        }
+
+        await ctx.reply(
+          '💬 Thank you for your feedback! We appreciate it. 🙏',
+          mainMenuKeyboard()
+        );
+        return;
+      }
+
       // Check if in onboarding
       const handledOnboarding = await handleOnboardingMessage(ctx);
       if (handledOnboarding) return;
@@ -360,9 +483,8 @@ function createBot() {
 
         const user = await User.findOne({ telegram_id: ctx.from.id });
 
-        // Non-admins can only track their own orders
         const query = { order_number: orderNumber };
-        if (user && !require('../services/notifications').isAdmin(ctx.from.id)) {
+        if (user && !isAdmin(ctx.from.id)) {
           query.customer_id = user._id;
         }
 
@@ -400,7 +522,7 @@ function createBot() {
         return ctx.reply(msg, { parse_mode: 'HTML' });
       }
 
-      // Unknown message – show menu
+      // Unknown message
       await ctx.reply(
         '🤔 I didn\'t understand that.\n\nUse the menu below or type /start to begin.',
         mainMenuKeyboard()
@@ -417,7 +539,6 @@ function createBot() {
     ctx.reply('❌ An unexpected error occurred. Please try again.').catch(() => {});
   });
 
-  // Store bot instance for notifications
   setBotInstance(bot);
 
   return bot;

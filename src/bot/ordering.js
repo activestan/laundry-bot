@@ -8,7 +8,8 @@
  * All messages use HTML parse mode.
  */
 const { User, Order, DeliveryDetail } = require('../models');
-const { DELIVERY, ORDER_STEPS } = require('../utils/constants');
+const { ORDER_STEPS } = require('../utils/constants');
+const { getDeliveryFee } = require('../services/settings');
 const {
   sanitize,
   generateOrderNumber,
@@ -145,7 +146,7 @@ function registerOrdering(bot) {
 
       await ctx.editMessageText(summary, {
         parse_mode: 'HTML',
-        ...deliveryKeyboard(),
+        ...deliveryKeyboard(await getDeliveryFee()),
       });
     } catch (err) {
       console.error('[Ordering] Done selecting error:', err);
@@ -158,12 +159,13 @@ function registerOrdering(bot) {
       await ctx.answerCbQuery();
       ctx.session = ctx.session || {};
       ctx.session.deliveryType = 'pickup';
-      ctx.session.deliveryFee = DELIVERY.PICKUP_FEE;
+      const pickupFee = await getDeliveryFee();
+      ctx.session.deliveryFee = pickupFee;
       ctx.session.step = ORDER_STEPS.ASK_LODGE_NAME;
 
       await ctx.editMessageText(
         `🚚 <b>Pickup Delivery selected</b>\n` +
-          `Delivery fee: ${formatDisplayPrice(DELIVERY.PICKUP_FEE)}\n\n` +
+          `Delivery fee: ${formatDisplayPrice(pickupFee)}\n\n` +
           `We need your pickup details.\n\n` +
           `🏠 <b>What is the name of your lodge/hostel/estate?</b>`,
         { parse_mode: 'HTML' }
@@ -178,7 +180,7 @@ function registerOrdering(bot) {
       await ctx.answerCbQuery();
       ctx.session = ctx.session || {};
       ctx.session.deliveryType = 'self';
-      ctx.session.deliveryFee = DELIVERY.SELF_FEE;
+      ctx.session.deliveryFee = 0;
       ctx.session.step = ORDER_STEPS.CONFIRM_ORDER;
 
       await showOrderSummary(ctx);
