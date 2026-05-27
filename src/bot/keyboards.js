@@ -11,8 +11,9 @@ const { formatDisplayPrice } = require('../services/catalogue');
 function mainMenuKeyboard() {
   return Markup.keyboard([
     ['🧺 New Order', '📋 My Orders'],
-    ['📜 Order History', '📦 Track Order'],
-    ['💳 My Account', 'ℹ️ Help'],
+    ['📜 Order History', '💳 Settle Pending'],
+    ['📦 Track Order', '💳 My Account'],
+    ['ℹ️ Help'],
   ]).resize();
 }
 
@@ -53,9 +54,6 @@ function historyPaginationKeyboard(currentPage, totalPages, months) {
 
 /**
  * Service selection inline keyboard (DYNAMIC from DB).
- * Shows display price (minus 1 kobo) to customers.
- * @param {Array} services - array of service documents from DB
- * @param {Set} selectedItems - Set of item IDs already in cart
  */
 function serviceMenuKeyboard(services, selectedItems = new Set()) {
   const buttons = services.map((svc) => {
@@ -68,7 +66,6 @@ function serviceMenuKeyboard(services, selectedItems = new Set()) {
     ];
   });
 
-  // Add Done button at bottom
   if (selectedItems.size > 0) {
     buttons.push([Markup.button.callback('✅ Done — Proceed', 'done_selecting')]);
   }
@@ -90,12 +87,32 @@ function deliveryKeyboard(pickupFee) {
 }
 
 /**
+ * Payment timing keyboard (self-delivery customers only).
+ */
+function paymentTimingKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('💳 Pay Now (Transfer)', 'pay_now')],
+    [Markup.button.callback('🏪 Pay When Collecting', 'pay_on_collection')],
+  ]);
+}
+
+/**
  * Confirm order inline keyboard.
  */
 function confirmOrderKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('✅ Confirm & Pay', 'confirm_pay')],
+    [Markup.button.callback('✅ Confirm Order', 'confirm_pay')],
     [Markup.button.callback('❌ Cancel Order', 'cancel_order')],
+  ]);
+}
+
+/**
+ * Collection confirmation keyboard — after payment for pay_on_collection orders.
+ */
+function collectionConfirmKeyboard(orderNumber) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('✅ Yes, I\'ve collected my clothes', `collected_${orderNumber}`)],
+    [Markup.button.callback('⏳ Not yet, I\'ll collect later', `not_collected_${orderNumber}`)],
   ]);
 }
 
@@ -122,6 +139,8 @@ module.exports = {
   historyPaginationKeyboard,
   serviceMenuKeyboard,
   deliveryKeyboard,
+  paymentTimingKeyboard,
   confirmOrderKeyboard,
+  collectionConfirmKeyboard,
   orderStatusKeyboard,
 };

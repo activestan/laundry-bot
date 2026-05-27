@@ -52,7 +52,7 @@ const orderSchema = new mongoose.Schema(
     },
     payment_status: {
       type: String,
-      enum: ['unpaid', 'paid', 'refunded'],
+      enum: ['unpaid', 'paid', 'pay_on_collection', 'refunded'],
       default: 'unpaid',
     },
     order_status: {

@@ -3,30 +3,28 @@
  *
  * Handles incoming Flutterwave payment webhook events.
  *
- * Flow:
- *   1. Receive webhook payload.
- *   2. Verify transaction via Flutterwave API.
- *   3. Match payment to user via virtual account reference.
- *   4. Find the user's latest unpaid order.
- *   5. Mark order as PAID.
- *   6. Create a Payment record.
- *   7. Send receipt to customer.
- *   8. Notify admin/workers.
+ * For pay_on_collection orders: after payment confirmation,
+ * asks the customer if they've collected their clothes.
  */
 const { User, Order, Payment, DeliveryDetail } = require('../models');
 const { verifyTransaction } = require('../services/flutterwave');
 const { generateReceiptId } = require('../utils/helpers');
 const { sendCustomerReceipt, notifyStaff } = require('../services/notifications');
+const { collectionConfirmKeyboard } = require('../bot/keyboards');
+
+let botInstance = null;
+
+function setBotForWebhook(bot) {
+  botInstance = bot;
+}
 
 async function handleFlutterwaveWebhook(req, res) {
-  // Immediately acknowledge the webhook (Flutterwave expects 200 quickly)
   res.status(200).json({ status: 'ok' });
 
   try {
     const payload = req.body;
     console.log('[Webhook] Received event:', JSON.stringify(payload).substring(0, 300));
 
-    // Only process charge.completed events
     if (payload.event !== 'charge.completed') {
       console.log('[Webhook] Ignoring non-charge event:', payload.event);
       return;
@@ -38,7 +36,7 @@ async function handleFlutterwaveWebhook(req, res) {
       return;
     }
 
-    // Verify the transaction with Flutterwave
+    // Verify with Flutterwave
     let verifiedTx;
     try {
       verifiedTx = await verifyTransaction(txData.id);
@@ -52,19 +50,16 @@ async function handleFlutterwaveWebhook(req, res) {
       return;
     }
 
-    // Find the user by virtual account reference
-    // The tx_ref or the account_number can be used to match
+    // Find user
     const accountNumber = txData.account_number || verifiedTx.account_number;
     const txRef = txData.tx_ref || verifiedTx.tx_ref;
 
     let user = null;
 
-    // Try matching by account number first
     if (accountNumber) {
       user = await User.findOne({ 'virtual_account.account_number': accountNumber });
     }
 
-    // Fallback: match by tx_ref pattern (LDRY-USR-<telegramId>)
     if (!user && txRef) {
       const match = txRef.match(/LDRY-USR-(\d+)/);
       if (match) {
@@ -72,11 +67,8 @@ async function handleFlutterwaveWebhook(req, res) {
       }
     }
 
-    // Fallback: match by account reference
     if (!user) {
-      user = await User.findOne({
-        'virtual_account.account_reference': txRef,
-      });
+      user = await User.findOne({ 'virtual_account.account_reference': txRef });
     }
 
     if (!user) {
@@ -86,15 +78,14 @@ async function handleFlutterwaveWebhook(req, res) {
 
     console.log(`[Webhook] Matched payment to user: ${user.first_name} ${user.last_name} (${user.telegram_id})`);
 
-    // Find the user's latest unpaid order
+    // Find the user's latest unpaid or pay_on_collection order
     const order = await Order.findOne({
       customer_id: user._id,
-      payment_status: 'unpaid',
+      payment_status: { $in: ['unpaid', 'pay_on_collection'] },
     }).sort({ created_at: -1 });
 
     if (!order) {
       console.warn('[Webhook] No unpaid order found for user:', user.telegram_id);
-      // Still record the payment
       await Payment.create({
         customer_id: user._id,
         telegram_id: user.telegram_id,
@@ -110,14 +101,8 @@ async function handleFlutterwaveWebhook(req, res) {
       return;
     }
 
-    // Verify amount matches (allow small rounding tolerance)
     const paidAmount = Number(verifiedTx.amount);
-    if (paidAmount < order.total_amount) {
-      console.warn(
-        `[Webhook] Underpayment: paid ${paidAmount}, expected ${order.total_amount}. Order: ${order.order_number}`
-      );
-      // We still process it but log the discrepancy
-    }
+    const wasPayOnCollection = order.payment_status === 'pay_on_collection';
 
     // Update order
     const receiptId = generateReceiptId();
@@ -142,9 +127,9 @@ async function handleFlutterwaveWebhook(req, res) {
       raw_webhook: payload,
     });
 
-    console.log(`[Webhook] Order ${order.order_number} marked as PAID.`);
+    console.log(`[Webhook] ✅ Order ${order.order_number} marked as PAID.`);
 
-    // Get delivery details if pickup
+    // Get delivery details
     let deliveryDetail = null;
     if (order.delivery_type === 'pickup') {
       deliveryDetail = await DeliveryDetail.findOne({ order_id: order._id });
@@ -155,9 +140,27 @@ async function handleFlutterwaveWebhook(req, res) {
 
     // Notify admin & workers
     await notifyStaff({ order, user, deliveryDetail });
+
+    // If this was a pay_on_collection order, ask if they've collected
+    if (wasPayOnCollection && botInstance) {
+      try {
+        await botInstance.telegram.sendMessage(
+          user.telegram_id,
+          `📦 <b>Have you collected your clothes?</b>\n\n` +
+            `Order: <code>${order.order_number}</code>\n\n` +
+            `Your payment has been confirmed. Please let us know if you've already picked up your laundry:`,
+          {
+            parse_mode: 'HTML',
+            ...collectionConfirmKeyboard(order.order_number),
+          }
+        );
+      } catch (err) {
+        console.error('[Webhook] Collection prompt failed:', err.message);
+      }
+    }
   } catch (err) {
     console.error('[Webhook] Unhandled error:', err);
   }
 }
 
-module.exports = { handleFlutterwaveWebhook };
+module.exports = { handleFlutterwaveWebhook, setBotForWebhook };

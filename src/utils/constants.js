@@ -35,6 +35,7 @@ const ORDER_STEPS = {
   SELECTING_ITEMS: 'selecting_items',
   ENTER_QUANTITY: 'enter_quantity',
   CHOOSE_DELIVERY: 'choose_delivery',
+  CHOOSE_PAYMENT_TIMING: 'choose_payment_timing',
   ASK_LODGE_NAME: 'ask_lodge_name',
   ASK_LODGE_ADDRESS: 'ask_lodge_address',
   ASK_LANDMARK: 'ask_landmark',

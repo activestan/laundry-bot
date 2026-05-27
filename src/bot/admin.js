@@ -35,7 +35,9 @@ function registerAdmin(bot) {
           '  /stats — Sales &amp; revenue statistics\n\n' +
           '📦 <b>Order Management:</b>\n' +
           '  /track <code>ORDER_NUMBER</code> — Full order details\n' +
-          '  /update <code>ORDER_NUMBER</code> <code>STATUS</code> — Update status\n\n' +
+          '  /update <code>ORDER_NUMBER</code> <code>STATUS</code> — Update status\n' +
+          '  /markpaid <code>ORDER_NUMBER</code> — Mark cash payment\n' +
+          '  /cashpayments — View all cash payments\n\n' +
           '💰 <b>Price Management:</b>\n' +
           '  /pricelist — View all items &amp; prices\n' +
           '  /setprice <code>ITEM_ID</code> <code>PRICE</code> — Change price\n' +
@@ -54,7 +56,9 @@ function registerAdmin(bot) {
           '━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
           '📦 <b>Order Management:</b>\n' +
           '  /track <code>ORDER_NUMBER</code> — View order details + pickup info\n' +
-          '  /update <code>ORDER_NUMBER</code> <code>STATUS</code> — Update order status\n\n' +
+          '  /update <code>ORDER_NUMBER</code> <code>STATUS</code> — Update order status\n' +
+          '  /markpaid <code>ORDER_NUMBER</code> — Mark cash payment\n' +
+          '  /cashpayments — View all cash payments\n\n' +
           '📋 <b>Statuses:</b> pending, washing, drying, ready, delivered, cancelled\n\n' +
           '💡 <i>When a new paid order comes in, you\'ll receive a notification automatically.</i>';
 
@@ -586,6 +590,138 @@ function registerAdmin(bot) {
     }
   });
 
+
+  // ─── /markpaid <ORDER_NUMBER> → Mark as cash paid (ADMIN + WORKER) ─
+  bot.command('markpaid', async (ctx) => {
+    if (!isStaff(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for staff only.');
+    }
+
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const orderNumber = args[0];
+
+      if (!orderNumber) {
+        return ctx.reply(
+          '📝 Usage: /markpaid <code>LDRY-2025-0001</code>\n\n' +
+          '<i>Use this when a customer pays cash in person.</i>',
+          { parse_mode: 'HTML' }
+        );
+      }
+
+      const order = await Order.findOne({ order_number: orderNumber.toUpperCase() });
+      if (!order) {
+        return ctx.reply('❌ Order <code>' + orderNumber + '</code> not found.', { parse_mode: 'HTML' });
+      }
+
+      if (order.payment_status === 'paid') {
+        return ctx.reply('✅ Order <code>' + order.order_number + '</code> is already marked as paid.', { parse_mode: 'HTML' });
+      }
+
+      order.payment_status = 'paid';
+      order.payment_date = new Date();
+      const { generateReceiptId } = require('../utils/helpers');
+      order.receipt_id = generateReceiptId();
+      await order.save();
+
+      const updaterRole = isAdmin(ctx.from.id) ? '👑 Admin' : '👷 Worker';
+      const updaterName = ctx.from.first_name || 'Staff';
+      const updaterId = ctx.from.id;
+
+      // Record the cash payment with who collected it
+      const { Payment } = require('../models');
+      await Payment.create({
+        order_id: order._id,
+        order_number: order.order_number,
+        customer_id: order.customer_id,
+        telegram_id: order.telegram_id,
+        amount: order.total_amount,
+        currency: 'NGN',
+        status: 'successful',
+        payment_type: 'cash',
+        raw_webhook: {
+          type: 'cash_payment',
+          collected_by: updaterName,
+          collected_by_role: updaterRole,
+          collected_by_telegram_id: updaterId,
+          collected_at: new Date().toISOString(),
+        },
+      });
+
+      await ctx.reply(
+        '✅ Order <code>' + order.order_number + '</code> marked as <b>PAID (CASH)</b>\n\n' +
+        '💰 Cash Collected: ' + formatNaira(order.total_amount) + '\n' +
+        '📅 Date: ' + formatDate(new Date()) + '\n' +
+        '👤 Collected by: ' + updaterRole + ' (' + updaterName + ')\n\n' +
+        '📧 Customer has been sent a receipt.',
+        { parse_mode: 'HTML' }
+      );
+
+      // Send receipt and notify
+      const user = await User.findOne({ _id: order.customer_id });
+      if (user) {
+        const { DeliveryDetail: DD } = require('../models');
+        let deliveryDetail = null;
+        if (order.delivery_type === 'pickup') {
+          deliveryDetail = await DD.findOne({ order_id: order._id });
+        }
+        const { sendCustomerReceipt, notifyStaff } = require('../services/notifications');
+        await sendCustomerReceipt({ order, user, deliveryDetail });
+        await notifyStaff({ order, user, deliveryDetail });
+      }
+    } catch (err) {
+      console.error('[Admin] /markpaid error:', err);
+      await ctx.reply('❌ Error marking order as paid.');
+    }
+  });
+
+  // ─── /cashpayments → View all cash payments (ADMIN ONLY) ──
+  bot.command('cashpayments', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply('🚫 This command is for admins only.');
+    }
+
+    try {
+      const { Payment } = require('../models');
+      const cashPayments = await Payment.find({ payment_type: 'cash' })
+        .sort({ created_at: -1 })
+        .limit(20)
+        .populate('customer_id', 'first_name last_name');
+
+      if (!cashPayments.length) {
+        return ctx.reply('📭 No cash payments recorded yet.');
+      }
+
+      let totalCash = 0;
+      let msg = '💵 <b>Cash Payments (last 20):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+      for (const p of cashPayments) {
+        const customer = p.customer_id
+          ? p.customer_id.first_name + ' ' + p.customer_id.last_name
+          : 'Unknown';
+        const collectedBy = p.raw_webhook && p.raw_webhook.collected_by
+          ? p.raw_webhook.collected_by + ' (' + p.raw_webhook.collected_by_role + ')'
+          : 'Unknown';
+
+        msg +=
+          '<code>' + p.order_number + '</code>\n' +
+          '  👤 Customer: ' + customer + '\n' +
+          '  💰 Amount: ' + formatNaira(p.amount) + '\n' +
+          '  🧑 Collected by: ' + collectedBy + '\n' +
+          '  📅 Date: ' + formatDate(p.created_at) + '\n\n';
+
+        totalCash += p.amount;
+      }
+
+      msg += '━━━━━━━━━━━━━━━━━━━━━━━━\n';
+      msg += '💵 <b>Total Cash Collected:</b> ' + formatNaira(totalCash);
+
+      await ctx.reply(msg, { parse_mode: 'HTML' });
+    } catch (err) {
+      console.error('[Admin] /cashpayments error:', err);
+      await ctx.reply('❌ Error fetching cash payments.');
+    }
+  });
   // ─── /update <ORDER_NUMBER> <STATUS> → Update (ADMIN + WORKER) ─
   bot.command('update', async (ctx) => {
     if (!isStaff(ctx.from.id)) {

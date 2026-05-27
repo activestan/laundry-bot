@@ -1,9 +1,9 @@
 /**
  * ordering.js – Handles the complete order flow.
  *
- * Uses dynamic services from MongoDB catalogue.
- * Display prices show minus 1 kobo (₦1,799.99).
- * Backend stores and charges full round numbers (₦1,800).
+ * PAYMENT LOGIC:
+ *   Pickup Delivery  → Must pay upfront (transfer to virtual account)
+ *   Self Delivery     → Choose: "Pay Now" or "Pay When Collecting"
  *
  * All messages use HTML parse mode.
  */
@@ -24,6 +24,7 @@ const {
 const {
   serviceMenuKeyboard,
   deliveryKeyboard,
+  paymentTimingKeyboard,
   confirmOrderKeyboard,
   mainMenuKeyboard,
 } = require('./keyboards');
@@ -41,10 +42,8 @@ function registerOrdering(bot) {
         return;
       }
 
-      // Load services from DB
       const services = await getActiveServices();
 
-      // Initialize order session
       ctx.session = ctx.session || {};
       ctx.session.step = ORDER_STEPS.SELECTING_ITEMS;
       ctx.session.cart = {};
@@ -79,20 +78,17 @@ function registerOrdering(bot) {
       ctx.session.selectedItems = ctx.session.selectedItems || [];
 
       if (ctx.session.cart[itemId]) {
-        // Already selected → deselect
         delete ctx.session.cart[itemId];
         ctx.session.selectedItems = ctx.session.selectedItems.filter((id) => id !== itemId);
         await ctx.answerCbQuery(`❌ Removed ${service.name}`);
       } else {
-        // Select and ask for quantity
         ctx.session.cart[itemId] = {
           name: service.name,
-          unit_price: service.price, // Full round number stored
+          unit_price: service.price,
           quantity: 0,
         };
         ctx.session.selectedItems.push(itemId);
 
-        // Ask for quantity
         ctx.session.step = ORDER_STEPS.ENTER_QUANTITY;
         ctx.session.currentItem = itemId;
 
@@ -105,13 +101,12 @@ function registerOrdering(bot) {
         return;
       }
 
-      // Update the menu
       const services = await getActiveServices();
       const selectedSet = new Set(Object.keys(ctx.session.cart));
       try {
         await ctx.editMessageReplyMarkup(serviceMenuKeyboard(services, selectedSet).reply_markup);
       } catch (e) {
-        // Message not modified – ignore
+        // Message not modified
       }
     } catch (err) {
       console.error('[Ordering] Item selection error:', err);
@@ -132,10 +127,8 @@ function registerOrdering(bot) {
         return;
       }
 
-      // Move to delivery selection
       ctx.session.step = ORDER_STEPS.CHOOSE_DELIVERY;
 
-      // Show cart summary — display prices to customer
       const { detailedItems, subtotal } = calculateCart(items);
       let summary = '🛒 <b>Your Cart:</b>\n\n';
       for (const item of detailedItems) {
@@ -153,7 +146,7 @@ function registerOrdering(bot) {
     }
   });
 
-  // ─── Delivery option callbacks ────────────────────────────────
+  // ─── Pickup Delivery → must pay upfront ───────────────────────
   bot.action('delivery_pickup', async (ctx) => {
     try {
       await ctx.answerCbQuery();
@@ -161,6 +154,7 @@ function registerOrdering(bot) {
       ctx.session.deliveryType = 'pickup';
       const pickupFee = await getDeliveryFee();
       ctx.session.deliveryFee = pickupFee;
+      ctx.session.paymentTiming = 'pay_now'; // Pickup always pays upfront
       ctx.session.step = ORDER_STEPS.ASK_LODGE_NAME;
 
       await ctx.editMessageText(
@@ -175,17 +169,54 @@ function registerOrdering(bot) {
     }
   });
 
+  // ─── Self Delivery → ask when to pay ──────────────────────────
   bot.action('delivery_self', async (ctx) => {
     try {
       await ctx.answerCbQuery();
       ctx.session = ctx.session || {};
       ctx.session.deliveryType = 'self';
       ctx.session.deliveryFee = 0;
+      ctx.session.step = ORDER_STEPS.CHOOSE_PAYMENT_TIMING;
+
+      await ctx.editMessageText(
+        '🏃 <b>Self Delivery selected</b>\n\n' +
+          'You\'ll drop off and collect your clothes yourself.\n\n' +
+          '💰 <b>When would you like to pay?</b>',
+        {
+          parse_mode: 'HTML',
+          ...paymentTimingKeyboard(),
+        }
+      );
+    } catch (err) {
+      console.error('[Ordering] delivery_self error:', err);
+    }
+  });
+
+  // ─── Pay Now (self delivery) ──────────────────────────────────
+  bot.action('pay_now', async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+      ctx.session = ctx.session || {};
+      ctx.session.paymentTiming = 'pay_now';
       ctx.session.step = ORDER_STEPS.CONFIRM_ORDER;
 
       await showOrderSummary(ctx);
     } catch (err) {
-      console.error('[Ordering] delivery_self error:', err);
+      console.error('[Ordering] pay_now error:', err);
+    }
+  });
+
+  // ─── Pay When Collecting (self delivery) ──────────────────────
+  bot.action('pay_on_collection', async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+      ctx.session = ctx.session || {};
+      ctx.session.paymentTiming = 'pay_on_collection';
+      ctx.session.step = ORDER_STEPS.CONFIRM_ORDER;
+
+      await showOrderSummary(ctx);
+    } catch (err) {
+      console.error('[Ordering] pay_on_collection error:', err);
     }
   });
 
@@ -210,6 +241,7 @@ function registerOrdering(bot) {
       delete ctx.session.selectedItems;
       delete ctx.session.deliveryType;
       delete ctx.session.deliveryFee;
+      delete ctx.session.paymentTiming;
       delete ctx.session.pickup;
       delete ctx.session.currentItem;
 
@@ -229,7 +261,7 @@ async function handleOrderingMessage(ctx) {
   const step = ctx.session.step;
   const text = sanitize(ctx.message.text);
 
-  // ─── Enter quantity for selected item ───────────────────────
+  // ─── Enter quantity ─────────────────────────────────────────
   if (step === ORDER_STEPS.ENTER_QUANTITY) {
     const quantity = parseInt(text, 10);
     if (isNaN(quantity) || quantity < 1 || quantity > 100) {
@@ -260,7 +292,7 @@ async function handleOrderingMessage(ctx) {
     return true;
   }
 
-  // ─── Pickup address: Lodge name ─────────────────────────────
+  // ─── Pickup: Lodge name ─────────────────────────────────────
   if (step === ORDER_STEPS.ASK_LODGE_NAME) {
     if (text.length < 2) {
       await ctx.reply('⚠️ Please enter a valid lodge/hostel name.');
@@ -269,12 +301,11 @@ async function handleOrderingMessage(ctx) {
     ctx.session.pickup = ctx.session.pickup || {};
     ctx.session.pickup.lodge_name = text;
     ctx.session.step = ORDER_STEPS.ASK_LODGE_ADDRESS;
-
     await ctx.reply('📫 <b>What is the full address?</b>', { parse_mode: 'HTML' });
     return true;
   }
 
-  // ─── Pickup address: Lodge address ──────────────────────────
+  // ─── Pickup: Lodge address ──────────────────────────────────
   if (step === ORDER_STEPS.ASK_LODGE_ADDRESS) {
     if (text.length < 5) {
       await ctx.reply('⚠️ Please enter a more detailed address.');
@@ -282,7 +313,6 @@ async function handleOrderingMessage(ctx) {
     }
     ctx.session.pickup.lodge_address = text;
     ctx.session.step = ORDER_STEPS.ASK_LANDMARK;
-
     await ctx.reply(
       '🗺️ <b>Any nearby landmark?</b>\n<i>(e.g. "Opposite GTBank, beside the market")</i>',
       { parse_mode: 'HTML' }
@@ -290,11 +320,10 @@ async function handleOrderingMessage(ctx) {
     return true;
   }
 
-  // ─── Pickup address: Landmark ───────────────────────────────
+  // ─── Pickup: Landmark ───────────────────────────────────────
   if (step === ORDER_STEPS.ASK_LANDMARK) {
     ctx.session.pickup.landmark = text || 'N/A';
     ctx.session.step = ORDER_STEPS.ASK_PHONE;
-
     await ctx.reply(
       '📞 <b>What is your phone number?</b>\n<i>(e.g. 08012345678)</i>',
       { parse_mode: 'HTML' }
@@ -302,7 +331,7 @@ async function handleOrderingMessage(ctx) {
     return true;
   }
 
-  // ─── Pickup address: Phone ──────────────────────────────────
+  // ─── Pickup: Phone ──────────────────────────────────────────
   if (step === ORDER_STEPS.ASK_PHONE) {
     const phone = text.replace(/[\s\-()]/g, '');
     if (phone.length < 10 || phone.length > 15) {
@@ -311,7 +340,6 @@ async function handleOrderingMessage(ctx) {
     }
     ctx.session.pickup.phone_number = phone;
     ctx.session.step = ORDER_STEPS.CONFIRM_ORDER;
-
     await showOrderSummary(ctx);
     return true;
   }
@@ -320,8 +348,7 @@ async function handleOrderingMessage(ctx) {
 }
 
 /**
- * Display the complete order summary for confirmation.
- * Shows display prices (minus 1 kobo) to customer.
+ * Display the complete order summary.
  */
 async function showOrderSummary(ctx) {
   const cart = ctx.session.cart || {};
@@ -329,6 +356,7 @@ async function showOrderSummary(ctx) {
   const { detailedItems, subtotal } = calculateCart(items);
   const deliveryFee = ctx.session.deliveryFee || 0;
   const total = subtotal + deliveryFee;
+  const paymentTiming = ctx.session.paymentTiming || 'pay_now';
 
   let summary = '📋 <b>ORDER SUMMARY</b>\n';
   summary += '━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
@@ -348,6 +376,15 @@ async function showOrderSummary(ctx) {
   summary += `  💰 <b>TOTAL = ${formatDisplayPrice(total)}</b>\n`;
   summary += '━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
+  // Show payment method
+  if (paymentTiming === 'pay_on_collection') {
+    summary += '🏪 <b>Payment:</b> Pay when collecting\n\n';
+  } else if (ctx.session.deliveryType === 'pickup') {
+    summary += '💳 <b>Payment:</b> Transfer before pickup\n\n';
+  } else {
+    summary += '💳 <b>Payment:</b> Pay now via transfer\n\n';
+  }
+
   if (ctx.session.pickup) {
     summary += '📍 <b>Pickup Address:</b>\n';
     summary += `  🏠 ${ctx.session.pickup.lodge_name}\n`;
@@ -356,7 +393,7 @@ async function showOrderSummary(ctx) {
     summary += `  📞 ${ctx.session.pickup.phone_number}\n\n`;
   }
 
-  summary += 'Tap <b>"Confirm &amp; Pay"</b> to proceed.';
+  summary += 'Tap <b>"Confirm Order"</b> to proceed.';
 
   await ctx.reply(summary, {
     parse_mode: 'HTML',
@@ -365,8 +402,7 @@ async function showOrderSummary(ctx) {
 }
 
 /**
- * Process the confirmed order: save to DB, show payment instructions.
- * Backend stores FULL round prices. Customer sees display prices.
+ * Process the confirmed order.
  */
 async function processOrderConfirmation(ctx) {
   const telegramId = ctx.from.id;
@@ -385,11 +421,11 @@ async function processOrderConfirmation(ctx) {
     return;
   }
 
-  // calculateCart uses full round prices from the cart
   const { detailedItems, subtotal } = calculateCart(rawItems);
   const deliveryType = ctx.session.deliveryType || 'self';
   const deliveryFee = ctx.session.deliveryFee || 0;
-  const totalAmount = subtotal + deliveryFee; // Full round number
+  const totalAmount = subtotal + deliveryFee;
+  const paymentTiming = ctx.session.paymentTiming || 'pay_now';
 
   const orderNumber = await generateOrderNumber();
 
@@ -402,7 +438,7 @@ async function processOrderConfirmation(ctx) {
     delivery_type: deliveryType,
     delivery_fee: deliveryFee,
     total_amount: totalAmount,
-    payment_status: 'unpaid',
+    payment_status: paymentTiming === 'pay_on_collection' ? 'pay_on_collection' : 'unpaid',
     order_status: 'pending',
   });
 
@@ -419,41 +455,53 @@ async function processOrderConfirmation(ctx) {
     });
   }
 
-  // Clear cart session
+  // Clear session
   delete ctx.session.step;
   delete ctx.session.cart;
   delete ctx.session.selectedItems;
   delete ctx.session.deliveryType;
   delete ctx.session.deliveryFee;
+  delete ctx.session.paymentTiming;
   delete ctx.session.pickup;
   delete ctx.session.currentItem;
 
-  // Payment instruction — show full price for transfer
-  let paymentMsg =
+  // ─── Build confirmation message based on payment timing ─────
+  let msg =
     `✅ <b>Order Placed Successfully!</b>\n\n` +
     `🔢 <b>Order Number:</b> <code>${orderNumber}</code>\n` +
     `💰 <b>Total:</b> ${formatFullPrice(totalAmount)}\n\n`;
 
-  if (user.virtual_account && user.virtual_account.account_number) {
-    paymentMsg +=
-      `💳 <b>To complete your order, transfer exactly</b>\n` +
-      `<b>${formatFullPrice(totalAmount)}</b> to:\n\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `🏦 <b>Bank:</b> ${user.virtual_account.bank_name}\n` +
-      `🔢 <b>Account:</b> <code>${user.virtual_account.account_number}</code>\n` +
-      `📝 <b>Name:</b> ${user.first_name} ${user.last_name}\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `⏳ Once we confirm your payment, you'll receive\n` +
-      `a receipt and your order will begin processing.\n\n` +
-      `📌 <i>Keep your order number safe: <code>${orderNumber}</code></i>`;
+  if (paymentTiming === 'pay_on_collection') {
+    // Pay when collecting — no account number shown
+    msg +=
+      `🏪 <b>Payment Method:</b> Pay when collecting\n\n` +
+      `Please bring your clothes to our location.\n` +
+      `You'll pay <b>${formatFullPrice(totalAmount)}</b> when you pick up your clean laundry.\n\n` +
+      `📌 <i>Keep your order number safe: <code>${orderNumber}</code></i>\n\n` +
+      `📱 For questions, WhatsApp: ${process.env.BUSINESS_WHATSAPP || '+234XXXXXXXXXX'}`;
   } else {
-    paymentMsg +=
-      `⚠️ Your payment account is not set up yet.\n` +
-      `Please contact support for manual payment instructions.\n` +
-      `📱 WhatsApp: ${process.env.BUSINESS_WHATSAPP || '+234XXXXXXXXXX'}`;
+    // Pay now — show account number
+    if (user.virtual_account && user.virtual_account.account_number) {
+      msg +=
+        `💳 <b>To complete your order, transfer exactly</b>\n` +
+        `<b>${formatFullPrice(totalAmount)}</b> to:\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🏦 <b>Bank:</b> ${user.virtual_account.bank_name}\n` +
+        `🔢 <b>Account:</b> <code>${user.virtual_account.account_number}</code>\n` +
+        `📝 <b>Name:</b> ${user.first_name} ${user.last_name}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `⏳ Once we confirm your payment, you'll receive\n` +
+        `a receipt and your order will begin processing.\n\n` +
+        `📌 <i>Keep your order number safe: <code>${orderNumber}</code></i>`;
+    } else {
+      msg +=
+        `⚠️ Your payment account is not set up yet.\n` +
+        `Please contact support for manual payment instructions.\n` +
+        `📱 WhatsApp: ${process.env.BUSINESS_WHATSAPP || '+234XXXXXXXXXX'}`;
+    }
   }
 
-  await ctx.editMessageText(paymentMsg, { parse_mode: 'HTML' });
+  await ctx.editMessageText(msg, { parse_mode: 'HTML' });
 }
 
 module.exports = { registerOrdering, handleOrderingMessage };
