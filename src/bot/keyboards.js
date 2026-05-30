@@ -60,7 +60,7 @@ function serviceMenuKeyboard(services, selectedItems = new Set()) {
     const check = selectedItems.has(svc.id) ? ' ✅' : '';
     return [
       Markup.button.callback(
-        `${svc.emoji} ${svc.name} — ${formatDisplayPrice(svc.price)}${check}`,
+        `${svc.emoji} ${svc.name} — ${formatDisplayPrice(svc.active_price || svc.price)}${check}`,
         `select_item_${svc.id}`
       ),
     ];

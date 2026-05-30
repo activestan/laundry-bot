@@ -1,7 +1,12 @@
 /**
  * Service Model
  * Dynamic laundry service catalogue stored in MongoDB.
- * Admins can add, edit, and remove items via bot commands.
+ *
+ * Each service has TWO prices:
+ *   - price: the current REGULAR price
+ *   - bonus_price: the discounted promo price
+ *
+ * The active price is determined by the global "bonus_mode" setting.
  */
 const mongoose = require('mongoose');
 
@@ -27,6 +32,11 @@ const serviceSchema = new mongoose.Schema(
     price: {
       type: Number,
       required: true,
+      min: 0,
+    },
+    bonus_price: {
+      type: Number,
+      default: null,
       min: 0,
     },
     is_active: {

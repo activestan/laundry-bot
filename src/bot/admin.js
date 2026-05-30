@@ -12,8 +12,11 @@ const {
   formatFullPrice,
   addService,
   updatePrice,
+  updateBonusPrice,
   removeService,
   reactivateService,
+  isBonusMode,
+  setBonusMode,
 } = require('../services/catalogue');
 const { getDeliveryFee, setDeliveryFee } = require('../services/settings');
 
@@ -39,6 +42,10 @@ function registerAdmin(bot) {
           '  /markpaid <code>ORDER_NUMBER</code> — Mark cash payment\n' +
           '  /cashpayments — View all cash payments\n\n' +
           '💰 <b>Price Management:</b>\n' +
+          '  /bonusstatus — Check pricing mode\n' +
+          '  /bonuson <code>PIN</code> — Activate bonus prices\n' +
+          '  /bonusoff <code>PIN</code> — Switch to regular prices\n' +
+          '  /setbonus <code>ITEM_ID</code> <code>PRICE</code> — Edit bonus price\n' +
           '  /pricelist — View all items &amp; prices\n' +
           '  /setprice <code>ITEM_ID</code> <code>PRICE</code> — Change price\n' +
           '  /additem <code>ID</code> <code>EMOJI</code> <code>PRICE</code> <code>NAME</code> — Add new item\n' +
@@ -83,15 +90,21 @@ function registerAdmin(bot) {
 
       if (!services.length) return ctx.reply('📭 No items in the catalogue.');
 
+      const bonusMode = await isBonusMode();
+      const modeLabel = bonusMode ? '🎁 BONUS MODE (Active)' : '💰 REGULAR MODE';
+
       let msg = '💰 <b>Price List (Admin View)</b>\n';
-      msg += '━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-      msg += '<b>Customers see</b> → <b>Backend charges</b>\n\n';
+      msg += '━━━━━━━━━━━━━━━━━━━━━━━━\n';
+      msg += `📌 Current Mode: <b>${modeLabel}</b>\n\n`;
 
       for (const s of services) {
         const status = s.is_active ? '✅' : '❌';
+        const activePrice = bonusMode && s.bonus_price ? s.bonus_price : s.price;
         msg += `${status} ${s.emoji} <b>${s.name}</b>\n`;
         msg += `  ID: <code>${s.id}</code>\n`;
-        msg += `  Display: ${formatDisplayPrice(s.price)} → Actual: ${formatFullPrice(s.price)}\n\n`;
+        msg += `  Regular: ${formatFullPrice(s.price)}`;
+        msg += s.bonus_price ? ` | Bonus: ${formatFullPrice(s.bonus_price)}` : ' | Bonus: not set';
+        msg += `\n  👉 <b>Active: ${formatDisplayPrice(activePrice)}</b>\n\n`;
       }
 
       msg += '━━━━━━━━━━━━━━━━━━━━━━━━\n';
@@ -305,7 +318,116 @@ function registerAdmin(bot) {
       await ctx.reply('❌ Error updating delivery fee.');
     }
   });
-  // ─── /orders → All orders (ADMIN ONLY) ────────────────────
+  // ─── /bonuson <PIN> → Activate bonus prices (ADMIN ONLY) ──
+  bot.command('bonuson', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.reply('🚫 This command is for admins only.');
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const pin = args[0];
+      const correctPin = process.env.BONUS_PIN || '1234';
+
+      if (!pin) {
+        return ctx.reply('📝 Usage: /bonuson <code>PIN</code>\n\n<i>Enter your admin PIN to activate bonus prices.</i>', { parse_mode: 'HTML' });
+      }
+
+      if (pin !== correctPin) {
+        return ctx.reply('❌ Incorrect PIN.');
+      }
+
+      await setBonusMode(true);
+      await ctx.reply(
+        '🎁 <b>Bonus Mode ACTIVATED!</b>\n\n' +
+        'All customers now see discounted bonus prices.\n' +
+        'Use /pricelist to see the current prices.',
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /bonuson error:', err);
+      await ctx.reply('❌ Error activating bonus mode.');
+    }
+  });
+
+  // ─── /bonusoff <PIN> → Deactivate bonus prices (ADMIN ONLY) ──
+  bot.command('bonusoff', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.reply('🚫 This command is for admins only.');
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const pin = args[0];
+      const correctPin = process.env.BONUS_PIN || '1234';
+
+      if (!pin) {
+        return ctx.reply('📝 Usage: /bonusoff <code>PIN</code>\n\n<i>Enter your admin PIN to switch to regular prices.</i>', { parse_mode: 'HTML' });
+      }
+
+      if (pin !== correctPin) {
+        return ctx.reply('❌ Incorrect PIN.');
+      }
+
+      await setBonusMode(false);
+      await ctx.reply(
+        '💰 <b>Regular Mode ACTIVATED!</b>\n\n' +
+        'All customers now see standard regular prices.\n' +
+        'Use /pricelist to see the current prices.',
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /bonusoff error:', err);
+      await ctx.reply('❌ Error deactivating bonus mode.');
+    }
+  });
+
+  // ─── /setbonus <ITEM_ID> <PRICE> → Edit bonus price (ADMIN ONLY) ──
+  bot.command('setbonus', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.reply('🚫 This command is for admins only.');
+    try {
+      const args = ctx.message.text.split(' ').slice(1);
+      const itemId = args[0];
+      const newPrice = parseInt(args[1], 10);
+
+      if (!itemId || isNaN(newPrice) || newPrice < 1) {
+        const services = await getActiveServices();
+        let msg = '📝 Usage: /setbonus <code>item_id</code> <code>bonus_price</code>\n\n';
+        msg += '<b>Available items:</b>\n';
+        for (const s of services) {
+          const bp = s.bonus_price ? formatFullPrice(s.bonus_price) : 'not set';
+          msg += `  <code>${s.id}</code> — ${s.name} (Regular: ${formatFullPrice(s.price)} | Bonus: ${bp})\n`;
+        }
+        msg += '\n<b>Example:</b> /setbonus native_wear 800';
+        return ctx.reply(msg, { parse_mode: 'HTML' });
+      }
+
+      const service = await updateBonusPrice(itemId, newPrice);
+
+      await ctx.reply(
+        '✅ Bonus price updated!\n\n' +
+        `${service.emoji} <b>${service.name}</b>\n` +
+        `  Regular: ${formatFullPrice(service.price)}\n` +
+        `  Bonus: ${formatFullPrice(service.bonus_price)} ← updated\n` +
+        `  Customers see: ${formatDisplayPrice(newPrice)} (when bonus mode is on)`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      console.error('[Admin] /setbonus error:', err);
+      await ctx.reply('❌ ' + (err.message || 'Error updating bonus price.'));
+    }
+  });
+
+  // ─── /bonusstatus → Check current pricing mode (ADMIN ONLY) ──
+  bot.command('bonusstatus', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.reply('🚫 This command is for admins only.');
+    try {
+      const bonusMode = await isBonusMode();
+      const status = bonusMode
+        ? '🎁 <b>Bonus Mode is ON</b>\n\nCustomers are seeing discounted bonus prices.\n\nTo switch to regular: /bonusoff <code>PIN</code>'
+        : '💰 <b>Regular Mode is ON</b>\n\nCustomers are seeing standard prices.\n\nTo switch to bonus: /bonuson <code>PIN</code>';
+      await ctx.reply(status, { parse_mode: 'HTML' });
+    } catch (err) {
+      console.error('[Admin] /bonusstatus error:', err);
+      await ctx.reply('❌ Error checking bonus status.');
+    }
+  });
+
+    // ─── /orders → All orders (ADMIN ONLY) ────────────────────
   bot.command('orders', async (ctx) => {
     if (!isAdmin(ctx.from.id)) {
       return ctx.reply('🚫 This command is for admins only.\n\nWorkers can use /track and /update.');

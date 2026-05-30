@@ -84,7 +84,7 @@ function registerOrdering(bot) {
       } else {
         ctx.session.cart[itemId] = {
           name: service.name,
-          unit_price: service.price,
+          unit_price: service.active_price,
           quantity: 0,
         };
         ctx.session.selectedItems.push(itemId);
@@ -93,7 +93,7 @@ function registerOrdering(bot) {
         ctx.session.currentItem = itemId;
 
         await ctx.editMessageText(
-          `${service.emoji} <b>${service.name}</b> — ${formatDisplayPrice(service.price)} each\n\n` +
+          `${service.emoji} <b>${service.name}</b> — ${formatDisplayPrice(service.active_price)} each\n\n` +
             `📝 <b>How many do you have?</b>\n` +
             `Enter a number:`,
           { parse_mode: 'HTML' }
